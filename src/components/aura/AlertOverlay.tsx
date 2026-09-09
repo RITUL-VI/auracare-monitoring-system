@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from "motion/react";
-import { BellRing, CheckCircle2, ShieldAlert, X } from "lucide-react";
+import { BellRing, CheckCircle2, Mail, MessageSquare, PhoneCall, ShieldAlert, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { Monitor } from "@/hooks/use-aura-monitor";
 
@@ -9,8 +9,21 @@ const COPY = {
   distress: "CRITICAL ALERT: Patient Distress Signature Detected",
 } as const;
 
+export const EMERGENCY_CONTACT = {
+  phone: "6260826042",
+  email: "ritulvijayvargiya@gmail.com",
+} as const;
+
 export function AlertOverlay({ monitor, bed }: { monitor: Monitor; bed: string }) {
   const { alert, alertDispatched, hr, rr } = monitor;
+  const summary = alert
+    ? `${COPY[alert]} | ${bed} | HR ${hr} bpm | RR ${rr.toFixed(0)} br/min`
+    : "";
+  const smsHref = `sms:${EMERGENCY_CONTACT.phone}?body=${encodeURIComponent(summary)}`;
+  const mailHref = `mailto:${EMERGENCY_CONTACT.email}?subject=${encodeURIComponent(
+    `AuraCare emergency – ${bed}`,
+  )}&body=${encodeURIComponent(`${summary}\n\nImmediate bedside attention required.`)}`;
+
 
   return (
     <AnimatePresence>
@@ -86,19 +99,48 @@ export function AlertOverlay({ monitor, bed }: { monitor: Monitor; bed: string }
                 </div>
               </dl>
 
-              <div className="mt-5 flex flex-wrap gap-2">
+              <div className="mt-5 rounded-xl border border-destructive/25 bg-destructive/5 p-3">
+                <p className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">
+                  Emergency contact
+                </p>
+                <p className="mt-1 font-display text-sm font-semibold">
+                  +91 {EMERGENCY_CONTACT.phone}
+                </p>
+                <p className="truncate text-xs text-muted-foreground">{EMERGENCY_CONTACT.email}</p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <Button asChild size="sm" variant="destructive" className="gap-2">
+                    <a href={`tel:${EMERGENCY_CONTACT.phone}`}>
+                      <PhoneCall className="size-4" /> Call
+                    </a>
+                  </Button>
+                  <Button asChild size="sm" variant="secondary" className="gap-2">
+                    <a href={smsHref}>
+                      <MessageSquare className="size-4" /> SMS
+                    </a>
+                  </Button>
+                  <Button asChild size="sm" variant="secondary" className="gap-2">
+                    <a href={mailHref}>
+                      <Mail className="size-4" /> Email
+                    </a>
+                  </Button>
+                </div>
+              </div>
+
+              <div className="mt-4 flex flex-wrap gap-2">
                 {alertDispatched ? (
                   <span className="flex items-center gap-2 rounded-lg border border-success/30 bg-success/10 px-3 py-2 text-sm text-success">
-                    <CheckCircle2 className="size-4" /> Caregiver push alert dispatched
+                    <CheckCircle2 className="size-4" /> Alert sent to +91 {EMERGENCY_CONTACT.phone} ·{" "}
+                    {EMERGENCY_CONTACT.email}
                   </span>
                 ) : (
                   <Button variant="destructive" onClick={monitor.dispatchAlert} className="gap-2">
-                    <BellRing className="size-4" /> Dispatch caregiver push alert
+                    <BellRing className="size-4" /> Notify emergency contact
                   </Button>
                 )}
                 <Button variant="secondary" onClick={monitor.dismissAlert}>
                   Acknowledge
                 </Button>
+
               </div>
             </motion.div>
           </motion.div>
