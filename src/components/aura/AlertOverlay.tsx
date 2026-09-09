@@ -99,16 +99,6 @@ export function AlertOverlay({ monitor, bed }: { monitor: Monitor; bed: string }
                 </div>
               </dl>
 
-              <div className="mt-5 flex flex-wrap gap-2">
-                {alertDispatched ? (
-                  <span className="flex items-center gap-2 rounded-lg border border-success/30 bg-success/10 px-3 py-2 text-sm text-success">
-                    <CheckCircle2 className="size-4" /> Caregiver push alert dispatched
-                  </span>
-                ) : (
-                  <Button variant="destructive" onClick={monitor.dispatchAlert} className="gap-2">
-                    <BellRing className="size-4" /> Dispatch caregiver push alert
-                  </Button>
-                )}
               <div className="mt-5 rounded-xl border border-destructive/25 bg-destructive/5 p-3">
                 <p className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">
                   Emergency contact
