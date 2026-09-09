@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from "motion/react";
-import { BellRing, CheckCircle2, ShieldAlert, X } from "lucide-react";
+import { BellRing, CheckCircle2, Mail, MessageSquare, PhoneCall, ShieldAlert, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { Monitor } from "@/hooks/use-aura-monitor";
 
@@ -9,8 +9,21 @@ const COPY = {
   distress: "CRITICAL ALERT: Patient Distress Signature Detected",
 } as const;
 
+export const EMERGENCY_CONTACT = {
+  phone: "6260826042",
+  email: "ritulvijayvargiya@gmail.com",
+} as const;
+
 export function AlertOverlay({ monitor, bed }: { monitor: Monitor; bed: string }) {
   const { alert, alertDispatched, hr, rr } = monitor;
+  const summary = alert
+    ? `${COPY[alert]} | ${bed} | HR ${hr} bpm | RR ${rr.toFixed(0)} br/min`
+    : "";
+  const smsHref = `sms:${EMERGENCY_CONTACT.phone}?body=${encodeURIComponent(summary)}`;
+  const mailHref = `mailto:${EMERGENCY_CONTACT.email}?subject=${encodeURIComponent(
+    `AuraCare emergency – ${bed}`,
+  )}&body=${encodeURIComponent(`${summary}\n\nImmediate bedside attention required.`)}`;
+
 
   return (
     <AnimatePresence>
