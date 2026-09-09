@@ -17,7 +17,7 @@ export type AlertKind = null | "tachycardia" | "bradypnea" | "distress";
 
 const SAMPLE_RATE = 30;
 const WINDOW = SAMPLE_RATE * 8;
-const CHART_POINTS = 240;
+const CHART_POINTS = 165;
 
 /** High-perfusion patches, normalized to the detected face box. */
 const PERFUSION_ROIS: Roi[] = [
@@ -188,8 +188,9 @@ export function useAuraMonitor() {
       const usable = raw !== null && Number.isFinite(raw);
       // Fallback blend: the measured trace drives the waveform when it carries
       // enough pulsatile energy, otherwise the modelled signal takes over.
-      const measuredEnergy = usable ? Math.min(1, Math.abs(raw as number) * 1.4) : 0;
-      const input = usable ? (raw as number) * 0.55 + synthetic * (1 - measuredEnergy) : synthetic;
+      const measured = usable ? Math.max(-2, Math.min(2, raw as number)) : 0;
+      const measuredEnergy = Math.min(1, Math.abs(measured) * 1.4);
+      const input = synthetic + measured * 0.35;
 
       // --- Stage 3: Butterworth bandpass ---
       const ppg = s.hrFilter.process(input);
