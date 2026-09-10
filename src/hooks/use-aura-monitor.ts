@@ -1,62 +1,68 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Bandpass,
+  ChromExtractor,
   HR_BAND,
   RR_BAND,
   averageRoiColor,
   estimateRate,
-  posProject,
+  roisFromLandmarks,
   signalConfidence,
   syntheticPulse,
-  type Rgb,
+  type Point,
   type Roi,
 } from "@/lib/rppg";
+import { saveDispatchedAlert } from "@/lib/alerts";
 
 export type WavePoint = { i: number; ppg: number; resp: number };
 export type AlertKind = null | "tachycardia" | "bradypnea" | "distress";
 
 const SAMPLE_RATE = 30;
-const WINDOW = SAMPLE_RATE * 8;
+const WINDOW = SAMPLE_RATE * 10;
 const CHART_POINTS = 165;
 
-/** High-perfusion patches, normalized to the detected face box. */
-const PERFUSION_ROIS: Roi[] = [
-  { x: 0.3, y: 0.14, w: 0.4, h: 0.16 }, // forehead
-  { x: 0.1, y: 0.46, w: 0.22, h: 0.18 }, // left cheek
-  { x: 0.68, y: 0.46, w: 0.22, h: 0.18 }, // right cheek
+/** Fallback patches used only until MediaPipe reports landmarks. */
+const FALLBACK_ROIS: Roi[] = [
+  { x: 0.34, y: 0.2, w: 0.32, h: 0.14 },
+  { x: 0.24, y: 0.46, w: 0.16, h: 0.14 },
+  { x: 0.6, y: 0.46, w: 0.16, h: 0.14 },
 ];
 
 export function useAuraMonitor() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  /** MediaPipe Face Mesh landmarks, published by the camera viewport. */
+  const landmarksRef = useRef<Point[] | null>(null);
   const [monitoring, setMonitoring] = useState(false);
   const [cameraLive, setCameraLive] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [distress, setDistress] = useState(false);
-  const [hr, setHr] = useState(78);
-  const [rr, setRr] = useState(16);
+  const [hr, setHr] = useState(0);
+  const [rr, setRr] = useState(0);
   const [confidence, setConfidence] = useState(0);
   const [wave, setWave] = useState<WavePoint[]>([]);
   const [alert, setAlert] = useState<AlertKind>(null);
   const [alertDispatched, setAlertDispatched] = useState(false);
   const [source, setSource] = useState<"rppg" | "synthetic">("synthetic");
+  const [tracking, setTracking] = useState(false);
 
   const streamRef = useRef<MediaStream | null>(null);
   const sampleCanvas = useRef<HTMLCanvasElement | null>(null);
   const rafRef = useRef<number | null>(null);
   const distressRef = useRef(false);
   const stateRef = useRef({
-    hr: 78,
-    rr: 16,
+    hr: 0,
+    rr: 0,
     targetHr: 78,
     targetRr: 16,
     tick: 0,
     time: 0,
     last: 0,
     acc: 0,
-    mean: null as Rgb | null,
+    liveFrames: 0,
     ppg: [] as number[],
     resp: [] as number[],
     chart: [] as WavePoint[],
+    chrom: new ChromExtractor(SAMPLE_RATE * 4),
     hrFilter: new Bandpass(HR_BAND[0], HR_BAND[1], SAMPLE_RATE),
     rrFilter: new Bandpass(RR_BAND[0], RR_BAND[1], SAMPLE_RATE),
   });
@@ -68,19 +74,26 @@ export function useAuraMonitor() {
     s.ppg = [];
     s.resp = [];
     s.chart = [];
-    s.mean = null;
     s.tick = 0;
     s.time = 0;
     s.acc = 0;
     s.last = 0;
+    s.hr = 0;
+    s.rr = 0;
+    s.liveFrames = 0;
+    s.chrom.reset();
     s.hrFilter = new Bandpass(HR_BAND[0], HR_BAND[1], SAMPLE_RATE);
     s.rrFilter = new Bandpass(RR_BAND[0], RR_BAND[1], SAMPLE_RATE);
+    landmarksRef.current = null;
   }, []);
 
   const start = useCallback(async () => {
     reset();
     setAlert(null);
     setAlertDispatched(false);
+    setHr(0);
+    setRr(0);
+    setTracking(false);
     setMonitoring(true);
     if (streamRef.current) return;
     try {
@@ -108,12 +121,15 @@ export function useAuraMonitor() {
     setDistress(false);
     setAlert(null);
     setConfidence(0);
+    setTracking(false);
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
     setCameraLive(false);
     if (videoRef.current) videoRef.current.srcObject = null;
     reset();
     setWave([]);
+    setHr(0);
+    setRr(0);
   }, [reset]);
 
   const simulateDistress = useCallback(() => {
@@ -139,8 +155,8 @@ export function useAuraMonitor() {
     if (!monitoring) return;
     if (!sampleCanvas.current) {
       sampleCanvas.current = document.createElement("canvas");
-      sampleCanvas.current.width = 160;
-      sampleCanvas.current.height = 120;
+      sampleCanvas.current.width = 240;
+      sampleCanvas.current.height = 180;
     }
     const canvas = sampleCanvas.current;
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
@@ -160,39 +176,39 @@ export function useAuraMonitor() {
       s.tick += 1;
       s.time += 1 / SAMPLE_RATE;
 
-      // Slow physiological wander toward target.
-      if (!distressRef.current && s.tick % 90 === 0) {
-        s.targetHr = 74 + Math.random() * 10;
-        s.targetRr = 15 + Math.random() * 3;
-      }
-
-      // --- Stage 1 & 2: ROI color averaging + chrominance projection ---
-      let raw: number | null = null;
+      // --- Stage 1: sample the tracked skin regions (real MediaPipe landmarks) ---
+      let measured: number | null = null;
+      let landmarked = false;
       const video = videoRef.current;
       if (ctx && video && video.readyState >= 2 && video.videoWidth) {
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        const rgb = averageRoiColor(ctx, canvas.width, canvas.height, PERFUSION_ROIS);
-        if (rgb) {
-          s.mean = s.mean
-            ? {
-                r: s.mean.r * 0.98 + rgb.r * 0.02,
-                g: s.mean.g * 0.98 + rgb.g * 0.02,
-                b: s.mean.b * 0.98 + rgb.b * 0.02,
-              }
-            : rgb;
-          raw = posProject(rgb, s.mean) * 40;
+        const lm = landmarksRef.current;
+        landmarked = Boolean(lm && lm.length > 100);
+        const rois = lm && landmarked ? roisFromLandmarks(lm) : FALLBACK_ROIS;
+        if (rois.length) {
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          const rgb = averageRoiColor(ctx, canvas.width, canvas.height, rois);
+          if (rgb) {
+            // --- Stage 2: CHROM chrominance projection ---
+            const v = s.chrom.push(rgb);
+            if (v !== null && Number.isFinite(v)) measured = v * 90;
+          }
         }
       }
 
-      const synthetic = syntheticPulse(s.time, s.targetHr, s.targetRr);
-      const usable = raw !== null && Number.isFinite(raw);
-      // Fallback blend: the measured trace drives the waveform when it carries
-      // enough pulsatile energy, otherwise the modelled signal takes over.
-      const measured = usable ? Math.max(-2, Math.min(2, raw as number)) : 0;
-      const measuredEnergy = Math.min(1, Math.abs(measured) * 1.4);
-      const input = synthetic + measured * 0.35;
+      const live = measured !== null && landmarked;
+      s.liveFrames = live ? Math.min(SAMPLE_RATE * 12, s.liveFrames + 1) : Math.max(0, s.liveFrames - 3);
+      const locked = s.liveFrames > SAMPLE_RATE * 2;
 
-      // --- Stage 3: Butterworth bandpass ---
+      // Real trace when the face is tracked; modelled signal only as fallback.
+      if (!live && !distressRef.current && s.tick % 90 === 0) {
+        s.targetHr = 74 + Math.random() * 10;
+        s.targetRr = 15 + Math.random() * 3;
+      }
+      const input = live
+        ? Math.max(-8, Math.min(8, measured as number))
+        : syntheticPulse(s.time, s.targetHr, s.targetRr);
+
+      // --- Stage 3: 4th-order Butterworth bandpass ---
       const ppg = s.hrFilter.process(input);
       const resp = s.rrFilter.process(input) * 3;
 
@@ -201,23 +217,39 @@ export function useAuraMonitor() {
       if (s.ppg.length > WINDOW) s.ppg.shift();
       if (s.resp.length > WINDOW) s.resp.shift();
 
-      s.chart.push({ i: s.tick, ppg: Number(ppg.toFixed(4)), resp: Number(resp.toFixed(4)) });
+      const scale = live ? 1 / (peakAbs(s.ppg) || 1) : 1;
+      s.chart.push({
+        i: s.tick,
+        ppg: Number((ppg * scale).toFixed(4)),
+        resp: Number((resp * (live ? scale * 0.8 : 1)).toFixed(4)),
+      });
       if (s.chart.length > CHART_POINTS) s.chart.shift();
 
-      // --- Stage 4: rate estimation ---
+      // --- Stage 4: rate estimation from the measured waveform ---
       if (s.tick % 15 === 0) {
         const hrEst = estimateRate(s.ppg, SAMPLE_RATE);
         const rrEst = estimateRate(s.resp, SAMPLE_RATE);
-        const hrTarget = hrEst && hrEst > 42 && hrEst < 190 ? hrEst : s.targetHr;
-        const rrTarget = rrEst && rrEst > 5 && rrEst < 45 ? rrEst : s.targetRr;
-        const blend = distressRef.current ? 0.5 : 0.25;
-        s.hr += (hrTarget - s.hr) * blend;
-        s.rr += (rrTarget - s.rr) * blend;
+        const hrValid = hrEst !== null && hrEst > 42 && hrEst < 190;
+        const rrValid = rrEst !== null && rrEst > 5 && rrEst < 45;
+
+        if (distressRef.current) {
+          // Operator-triggered drill: drive the reading to the distress signature.
+          s.hr += (s.targetHr - s.hr) * 0.5;
+          s.rr += (s.targetRr - s.rr) * 0.5;
+        } else if (live && locked) {
+          if (hrValid) s.hr = s.hr ? s.hr + (hrEst! - s.hr) * 0.3 : hrEst!;
+          if (rrValid) s.rr = s.rr ? s.rr + (rrEst! - s.rr) * 0.3 : rrEst!;
+        } else if (!live) {
+          s.hr += ((hrValid ? hrEst! : s.targetHr) - s.hr) * 0.25;
+          s.rr += ((rrValid ? rrEst! : s.targetRr) - s.rr) * 0.25;
+        }
+
         setHr(Math.round(s.hr));
         setRr(Math.round(s.rr * 10) / 10);
-        setSource(cameraLive && measuredEnergy > 0.08 ? "rppg" : "synthetic");
+        setSource(live && locked ? "rppg" : "synthetic");
+        setTracking(landmarked);
         const conf = signalConfidence(s.ppg);
-        setConfidence(cameraLive ? Math.max(72, conf) : Math.max(58, Math.min(conf, 84)));
+        setConfidence(live && locked ? conf : Math.min(conf, 70));
       }
 
       if (s.tick % 3 === 0) setWave([...s.chart]);
@@ -230,22 +262,39 @@ export function useAuraMonitor() {
       rafRef.current = null;
       s.last = 0;
     };
-  }, [monitoring, cameraLive]);
+  }, [monitoring]);
 
   // Threshold-based alerting.
   useEffect(() => {
     if (!monitoring) return;
     if (hr > 120) setAlert("tachycardia");
-    else if (rr < 10) setAlert("bradypnea");
+    else if (rr > 0 && rr < 10) setAlert("bradypnea");
     else if (distress) setAlert("distress");
     else setAlert(null);
   }, [hr, rr, distress, monitoring]);
 
+  const dispatchAlert = useCallback(
+    async (bed: string) => {
+      setAlertDispatched(true);
+      if (!alert) return;
+      await saveDispatchedAlert({
+        bed,
+        kind: alert,
+        hr,
+        rr,
+        confidence,
+      });
+    },
+    [alert, hr, rr, confidence],
+  );
+
   return {
     videoRef,
+    landmarksRef,
     monitoring,
     cameraLive,
     cameraError,
+    tracking,
     hr,
     rr,
     confidence,
@@ -258,9 +307,18 @@ export function useAuraMonitor() {
     stop,
     simulateDistress,
     clearDistress,
-    dispatchAlert: () => setAlertDispatched(true),
+    dispatchAlert,
     dismissAlert: clearDistress,
   };
+}
+
+function peakAbs(xs: number[]): number {
+  let max = 0;
+  for (let i = Math.max(0, xs.length - 90); i < xs.length; i++) {
+    const v = Math.abs(xs[i]!);
+    if (v > max) max = v;
+  }
+  return max;
 }
 
 export type Monitor = ReturnType<typeof useAuraMonitor>;
