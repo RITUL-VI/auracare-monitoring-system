@@ -176,3 +176,97 @@ export function syntheticPulse(t: number, hr: number, rr: number): number {
 
 export const HR_BAND: [number, number] = [0.7, 4];
 export const RR_BAND: [number, number] = [0.13, 0.6];
+
+export type Point = { x: number; y: number };
+
+/** MediaPipe Face Mesh indices over high-perfusion skin patches. */
+export const FOREHEAD_IDX = [10, 67, 69, 104, 108, 151, 337, 299, 333, 297, 338, 9, 8];
+export const LEFT_CHEEK_IDX = [50, 101, 118, 205, 36, 142];
+export const RIGHT_CHEEK_IDX = [280, 330, 347, 425, 266, 371];
+
+/**
+ * Build normalized sampling rectangles from real MediaPipe landmarks so the
+ * pulse is read from the tracked face rather than a fixed frame region.
+ */
+export function roisFromLandmarks(landmarks: Point[]): Roi[] {
+  const box = (indices: number[]): Roi | null => {
+    const pts = indices.map((i) => landmarks[i]).filter(Boolean) as Point[];
+    if (pts.length < 3) return null;
+    const xs = pts.map((p) => p.x);
+    const ys = pts.map((p) => p.y);
+    let x0 = Math.min(...xs);
+    let x1 = Math.max(...xs);
+    let y0 = Math.min(...ys);
+    let y1 = Math.max(...ys);
+    // Inset slightly to stay clear of hairline / jaw edges.
+    const ix = (x1 - x0) * 0.12;
+    const iy = (y1 - y0) * 0.12;
+    x0 += ix;
+    x1 -= ix;
+    y0 += iy;
+    y1 -= iy;
+    const w = x1 - x0;
+    const h = y1 - y0;
+    if (!(w > 0.01 && h > 0.01) || x0 < 0 || y0 < 0 || x1 > 1 || y1 > 1) return null;
+    return { x: x0, y: y0, w, h };
+  };
+
+  return [box(FOREHEAD_IDX), box(LEFT_CHEEK_IDX), box(RIGHT_CHEEK_IDX)].filter(
+    (r): r is Roi => r !== null,
+  );
+}
+
+/**
+ * CHROM (de Haan & Jeanne) chrominance extractor with a sliding window, so the
+ * X/Y projection ratio is computed from real signal statistics.
+ */
+export class ChromExtractor {
+  private xs: number[] = [];
+  private ys: number[] = [];
+  private mean: Rgb | null = null;
+  private readonly size: number;
+
+  constructor(size = 120) {
+    this.size = size;
+  }
+
+  reset() {
+    this.xs = [];
+    this.ys = [];
+    this.mean = null;
+  }
+
+  get ready() {
+    return this.xs.length >= 24;
+  }
+
+  push(rgb: Rgb): number | null {
+    this.mean = this.mean
+      ? {
+          r: this.mean.r * 0.95 + rgb.r * 0.05,
+          g: this.mean.g * 0.95 + rgb.g * 0.05,
+          b: this.mean.b * 0.95 + rgb.b * 0.05,
+        }
+      : rgb;
+
+    const m = this.mean;
+    if (m.r < 1 || m.g < 1 || m.b < 1) return null;
+
+    const rn = rgb.r / m.r - 1;
+    const gn = rgb.g / m.g - 1;
+    const bn = rgb.b / m.b - 1;
+
+    const x = 3 * rn - 2 * gn;
+    const y = 1.5 * rn + gn - 1.5 * bn;
+
+    this.xs.push(x);
+    this.ys.push(y);
+    if (this.xs.length > this.size) this.xs.shift();
+    if (this.ys.length > this.size) this.ys.shift();
+    if (!this.ready) return null;
+
+    const sy = std(this.ys);
+    const alpha = sy > 1e-9 ? std(this.xs) / sy : 0;
+    return x - alpha * y;
+  }
+}
