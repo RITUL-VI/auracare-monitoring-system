@@ -14,7 +14,48 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      alerts: {
+        Row: {
+          alert_type: string
+          bed: string
+          created_at: string
+          dispatched_at: string
+          heart_rate: number | null
+          id: string
+          message: string
+          notified_email: string | null
+          notified_phone: string | null
+          respiration_rate: number | null
+          signal_confidence: number | null
+        }
+        Insert: {
+          alert_type: string
+          bed: string
+          created_at?: string
+          dispatched_at?: string
+          heart_rate?: number | null
+          id?: string
+          message: string
+          notified_email?: string | null
+          notified_phone?: string | null
+          respiration_rate?: number | null
+          signal_confidence?: number | null
+        }
+        Update: {
+          alert_type?: string
+          bed?: string
+          created_at?: string
+          dispatched_at?: string
+          heart_rate?: number | null
+          id?: string
+          message?: string
+          notified_email?: string | null
+          notified_phone?: string | null
+          respiration_rate?: number | null
+          signal_confidence?: number | null
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
